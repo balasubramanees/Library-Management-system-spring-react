@@ -70,7 +70,7 @@
 | Service | Owns | API (behind `/api` on the gateway) |
 |---|---|---|
 | **user-service** | Users, sessions (opaque 256-bit tokens, 30 min idle timeout) | `POST /sessions` · `GET /sessions/current` · `DELETE /sessions/current` |
-| **library-service** | Books (one copy per title), loans with due dates, FIFO wait lists, deposit accounts and late fees, notifications | `GET /books` · `POST /books` · `POST /books/borrow` · `POST /books/return` · `POST /books/extend` · `POST /books/waitlist` · `GET /me` · `GET /me/status` · `POST /me/deposit` · demo only: `GET /admin/clock`, `POST /admin/clock/advance` |
+| **library-service** | Books (one copy per title), loans with due dates, FIFO wait lists, deposit accounts and late fees, notifications, the admin dashboard (read model) | `GET /books` · `POST /books` · `POST /books/borrow` · `POST /books/return` · `POST /books/extend` · `POST /books/waitlist` · `GET /me` · `GET /me/status` · `POST /me/deposit` · admin only: `GET /admin/dashboard` · demo only: `GET /admin/clock`, `POST /admin/clock/advance` |
 | **gateway** | Edge concerns only (no business logic) | Routes above; `/fallback/{service}`; `/actuator/*` |
 
 Book commands are **task-based and addressed by title** (`{"title": "1984"}`), mirroring `borrow "1984"` on the CLI. That keeps the "not registered" error reachable and matches the brief exactly.
@@ -138,7 +138,7 @@ The system uses patterns at three levels: **architecture** (how the system is sp
 | **API Gateway** | `gateway` (`RoutesConfig`) | Single entry point; cross-cutting edge concerns (routing, breakers, rate limit, request id) live in one place |
 | **Hexagonal / Ports & Adapters** | every service: `domain` → `application` (+ `port`) → `adapter/in`, `adapter/out` | Business rules have no framework code; storage and HTTP are swappable |
 | **Layered (inside the hexagon)** | domain → application → adapters | Dependencies point inwards only |
-| **Micro-frontends** (runtime composition) | `shell` + `mfe-catalog` + `mfe-account` | Independently built and served UI modules |
+| **Micro-frontends** (runtime composition) | `shell` + `mfe-catalog` + `mfe-account` (members only) + `mfe-admin` (admin only, library dashboard) | Independently built and served UI modules; the manifest's `memberOnly` / `adminOnly` flags decide who gets which remote |
 | **Backend-for-Frontend edge / reverse proxy** | shell server `/api` proxy (`serve-frontends.mjs`) | Same-origin API calls, no CORS, one place to add `X-Forwarded-For` |
 | **Token introspection** | `UserServiceClient` → `GET /sessions/current` | Services trust user-service for identity; logout is immediate |
 | **Task-based API (command style)** | `POST /books/borrow`, `/return`, `/waitlist` | One endpoint per business command, exactly like the CLI commands |
@@ -165,7 +165,7 @@ The system uses patterns at three levels: **architecture** (how the system is sp
 | **Value Object** | `BookTitle`, `UserName` | Immutable, self-validating, equality by normalised key |
 | **Entity** | `User`, `Member` | Identity = lower-cased name |
 | **Domain event** | `WaitlistAllocation` | Raised when a returned book is handed to the next member |
-| **Repository** | `BookRepository`, `UserRepository` (+ in-memory implementations) | Collection-like access to aggregates |
+| **Repository** | `BookRepository`, `AccountRepository`, `UserRepository` (+ in-memory implementations) | Collection-like access to aggregates |
 | **Application service** | `LibraryService`, `SessionService` | One method per use case; no business rules of its own |
 | **Bounded context** | identity (user-service) vs lending (library-service) | Split where there is no shared invariant |
 
@@ -178,7 +178,7 @@ The system uses patterns at three levels: **architecture** (how the system is sp
 | **Decorator** | API client layering `breaker → retry → timeout → fetch` (`createApiClient`) | Each layer wraps the next with one extra responsibility |
 | **State** | `CircuitBreaker` (`CLOSED` / `OPEN` / `HALF_OPEN`) | Behaviour of `execute()` depends on the current state |
 | **Strategy** | `isFailure` classifier in `CircuitBreaker`, `shouldRetry` in `retry()`, `IdGenerator`/`Clock` injected into services | Pluggable policy without changing the algorithm |
-| **Observer / Publish-Subscribe** | `EventBus` (`library:changed`, `toast:show`) | Micro-frontends react to each other without direct imports |
+| **Observer / Publish-Subscribe** | `EventBus` (`library:changed`, `toast:show`, `account:status`, `session:ended`) | Micro-frontends react to each other without direct imports; `account:status` lets the shell's welcome panel mirror the account remote's latest status |
 | **Chain of Responsibility** | Gateway `GlobalFilter`s (`RequestIdFilter` → `RateLimitFilter` → route filters); servlet `RequestIdFilter` | Each filter handles or passes the request on |
 | **Static Factory Method** | `Book.register/restore`, `BookTitle.of`, `UserName.of`, `User.register`, `ApiError.of`, `createApiClient`, `createRemoteLoader`, `createEventBus` | Named constructors that validate before creating |
 | **Memento / Snapshot** | `Book.snapshot()` / `Book.restore()` | Repositories store immutable snapshots, so state changes only via `save` |
@@ -201,6 +201,7 @@ The system uses patterns at three levels: **architecture** (how the system is sp
 | **Rs. 500 cash deposit** recorded at registration (the member's first contact with the library), shown as "Rs. 500 received as deposit in cash." | `LibraryService.accountOf` → `MemberAccount.open` |
 | Top-ups of **Rs. 100 – 100,000** | `LibraryService.deposit` |
 | The **admin** (librarian) has no deposit and cannot borrow/return/extend/queue; sees every loan's borrower, due date and overdue days | `LibraryService.requireMember`, `toView` |
+| The **admin dashboard** counts registered members, books out, wait-list requests and deposits held, and flags each loan as **overdue** or **due soon** (due within 3 days, today included); a member with an overdue book or a balance ≤ 0 is shown as blocked | `LibraryService.dashboard` (`DUE_SOON_DAYS`), `AdminDashboardController` |
 | All amounts are whole rupees (`Money`); all dates are calendar days in **Asia/Kolkata** (`library.time-zone`) | `Money`, `AdjustableClock` |
 
 All values are configurable in `library-service/src/main/resources/application.yml` (`library.lending.*`).
@@ -326,11 +327,11 @@ Every run starts with no users, books or sessions (all in memory), and recreates
 | Level | Tool | What |
 |---|---|---|
 | Domain unit | JUnit 5 + AssertJ | `Book` rules (borrow/return/queue), value objects, `TokenBucketRateLimiter`, session expiry |
-| Application | JUnit 5 | Use cases incl. the full example, notification once-only, **concurrency** (32 threads) |
+| Application | JUnit 5 | Use cases incl. the full example, notification once-only, **concurrency** (32 threads), admin dashboard (admin only; counts, overdue / due-soon flags, blocked members) |
 | REST (black box) | **REST Assured** on a random port | user-service session API; library-service *example session replayed over HTTP*, error mapping (400/401/403/404/409/415/503); gateway routing, request-id propagation, **fallback on 5xx and on unreachable service**, **rate limiting 429** |
 | Resilience integration | Spring Boot test + JDK HTTP server as fake user-service | Retry count, 401 is not a failure, breaker opens and then **fails fast without calling** |
 | Frontend unit | `node:test` + tsx | Circuit breaker states, retry/backoff, timeout, API client (no POST retries, breaker on 5xx only, 401 hook), remote loader (contract/version/timeout/retry), event bus isolation |
-| End-to-end UI | **Playwright** | The **example session through the browser**, login validation, case-insensitive names, reload persistence, stale session after restart, admin duplicate handling, cross-remote sync, **remote failure isolation + retry**, **client circuit breaker banner and recovery** |
+| End-to-end UI | **Playwright** | The **example session through the browser**, login validation, case-insensitive names, reload persistence, stale session after restart, admin duplicate handling, cross-remote sync, **remote failure isolation + retry**, **client circuit breaker banner and recovery**, **admin dashboard** (hidden from members, loans and members listed, overdue loan flagged with its fee) |
 
 ---
 

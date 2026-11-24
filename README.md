@@ -1,19 +1,174 @@
 # Library Management
 
-A small library system: members register with a cash deposit, borrow books with a due date, extend or return them (late returns cost a fee), and join wait lists; an admin (librarian) manages the catalogue.
+A small library system: members register with a cash deposit, borrow books with a due date, extend or return them (late returns cost a fee), and join wait lists. An admin (librarian) manages the catalogue and watches loans on a dashboard.
 
 It is built as **Spring Boot microservices** behind a **Spring Cloud Gateway**, with a **React micro-frontend** UI. Resilience patterns (circuit breakers, retries, timeouts, fallbacks and rate limiting) are applied at every hop.
 
+**Contents:** [1. Architecture](#1-architecture) · [2. Features](#2-features-at-a-glance) · [3. Quick start](#3-quick-start) · [4. Instruction manual](#4-instruction-manual) · [5. Tests](#5-tests) · [6. Project layout](#6-project-layout) · [7. Configuration](#7-configuration) · [8. Assumptions](#8-assumptions-and-decisions) · [9. Troubleshooting](#9-troubleshooting)
+
+---
+
+## 1. Architecture
+
+### 1.1 System overview
+
 ```
-Browser ── shell :3000 ──┬── catalog remote :3001        (React micro-frontends, runtime composition)
-                         ├── account remote :3002       (members)
-                         ├── admin remote   :3003       (librarian dashboard)
-                         └── /api ─► gateway :8080 ──┬─► user-service    :8081  (login, sessions)
-                                                     └─► library-service :8082  (books, loans, wait lists, deposits)
-                                                                  └─► user-service (token check, circuit breaker)
+                         ┌─ catalog remote :3001  (everyone: list, add, borrow, wait list, return)
+Browser ── shell :3000 ──┼─ account remote :3002  (members only: status, extend, return, deposit)
+           (host app)    ├─ admin remote   :3003  (admin only: library dashboard)
+                         └─ /api ─► gateway :8080 ──┬─► user-service    :8081  (login, sessions)
+                                                    └─► library-service :8082  (books, loans, wait lists,
+                                                                 │               deposits, dashboard)
+                                                                 └─► user-service (token check)
 ```
 
-## Features at a glance
+The system has two halves that meet at one HTTP contract:
+
+* **Backend:** two Spring Boot services behind a gateway. Each service is built **hexagonally** (business rules in the middle, technology at the edges).
+* **Frontend:** a **shell** (host) application that loads three independently built **micro-frontends** ("remotes") at runtime and gives them shared services: session, API client, event bus.
+* **Contract:** the JSON API, written down once as TypeScript types in `frontend/packages/contracts` and as Java records in each service's DTO classes.
+
+How one request travels (e.g. a member clicks **Borrow**):
+
+1. The catalogue remote asks the shell's **API client** to `POST /api/books/borrow`. The client wraps the call in a circuit breaker and a timeout.
+2. The browser sends it to the **shell server** on the same origin (no CORS). The shell server proxies it to the **gateway**.
+3. The gateway assigns or keeps an `X-Request-Id`, applies the **rate limit**, and routes to library-service through a **circuit breaker** with a JSON fallback.
+4. library-service asks **user-service** who owns the bearer token (**token introspection**, with its own retry and circuit breaker), then runs the use case in `LibraryService`.
+5. The answer returns the same way. The remote shows a toast and publishes `library:changed` on the shell's **event bus**, so every other panel refreshes itself.
+
+Step-by-step sequence diagrams with the real class names are in [docs/DESIGN.md §7](docs/DESIGN.md#7-key-flows).
+
+### 1.2 Backend architecture
+
+#### Why two services and a gateway
+
+| Option considered | Verdict |
+|---|---|
+| Modular monolith (one Spring Boot app) | Simplest, but there would be no network boundary for circuit breakers and retries to protect. Microservices were a requirement. |
+| **Gateway + user-service + library-service** | **Chosen.** There are real service-to-service calls, each service owns its data, and the lending rules stay in one place. |
+| Gateway + separate catalogue, loan, wait-list and notification services | Rejected. Borrow, return and wait list must change a book's availability **and** its queue together, and a return also charges the deposit. Splitting these would turn every return into a distributed transaction (sagas or distributed locks) with no business gain. |
+| Full Spring Cloud (Eureka, Config Server) | Rejected for a local demo: 5–6 JVMs and a slow start without adding behaviour. Listed as future work. |
+
+The services are split at the one boundary that has no shared rule: **identity** (who you are, your session) versus **lending** (books, loans, wait lists, deposits).
+
+| Component | Owns | Main API (behind `/api`) |
+|---|---|---|
+| **gateway** (Spring Cloud Gateway) | Edge concerns only, no business logic: routing, request ids, rate limiting, circuit breakers, fallbacks | Routes `/api/sessions/**` to user-service and `/api/books/**`, `/api/me/**`, `/api/admin/**` to library-service |
+| **user-service** | Users and sessions (random 256-bit tokens, 30-minute idle timeout) | `POST /sessions` (login), `GET /sessions/current` (token check), `DELETE /sessions/current` (logout) |
+| **library-service** | Books, loans and due dates, FIFO wait lists, deposit accounts and late fees, notifications, admin dashboard | `GET/POST /books`, `POST /books/borrow`, `/return`, `/extend`, `/waitlist`, `GET /me/status`, `POST /me/deposit`, `GET /admin/dashboard`, demo clock `/admin/clock` |
+| **service-commons** | A small shared "chassis" library, not business code: the JSON error format and the request-id filter, wired in by Spring Boot auto-configuration | — |
+
+Book commands are **task-based and addressed by title** (`POST /books/borrow {"title": "1984"}`), one endpoint per command of the brief, rather than generic CRUD.
+
+#### Inside each service: hexagonal architecture (ports and adapters)
+
+```
+com.library.books
+├── domain/            pure Java, no Spring: Book (aggregate), Loan, MemberAccount, Money, BookTitle, errors
+├── application/       use cases (LibraryService), read models (LibraryViews)
+│   └── port/          interfaces the use cases need: BookRepository, AccountRepository,
+│                      NotificationInbox, MemberDirectory
+├── adapter/
+│   ├── in/web/        REST controllers, DTOs, error mapping, CurrentMemberResolver
+│   └── out/           in-memory repositories; UserServiceClient (HTTP + Resilience4j)
+└── config/            composition root: the only place that connects adapters to ports
+```
+
+* **Dependencies point inwards.** The domain and application layers import no framework code. They are unit-tested without Spring.
+* **Business rules live in the domain.** For example, `Book` enforces "an available book has no wait list; on return it goes to the first in line", `Loan` computes due dates and late fees, and `MemberAccount` records deposits and fees.
+* **`LibraryService` has one method per use case** (`borrow`, `returnBook`, `extendLoan`, `dashboard`, …). It checks who may do what (admin vs member) and coordinates the domain objects and ports.
+* **Swapping technology means writing an adapter.** Moving to PostgreSQL means new implementations of `BookRepository` and `AccountRepository`; the use cases do not change.
+* **Authentication is impossible to forget.** Any controller method that takes a `Member` parameter gets it from `CurrentMemberResolver`, which checks the token with user-service, or the request fails with 401.
+* **Authorisation is enforced in the application layer** (`ForbiddenException` → 403), not only by hiding buttons in the UI.
+
+#### Data and concurrency
+
+* All state is **in memory**, so every run is a clean start, as the brief asks. Repositories store **immutable snapshots**, so state changes only through `save`, just as it would with a database.
+* Tomcat serves requests on many threads. `LibraryService` protects every read-modify-write with a **read-write lock**. A test fires 32 concurrent borrows of the same book and expects exactly one to succeed. With a database, this would become a transaction plus optimistic locking.
+* **Errors** use one JSON format everywhere, `{"error": {"code", "message", "requestId"}}`, with HTTP codes that mean something: 400 validation, 401 not logged in, 403 not allowed, 404 not registered, 409 rule broken (e.g. not available, borrowing blocked), 429 rate-limited, 503 a service is down.
+
+### 1.3 Frontend architecture
+
+#### Micro-frontends with runtime composition
+
+The UI is split into a **shell** and three **remotes**. Each is built separately and served from its own origin (port), as it would be from separate CDNs.
+
+| App | Port | Shown to | Responsibility |
+|---|---|---|---|
+| **shell** (host) | 3000 | everyone | Login page, session, layout, welcome panel, toasts, service-status banner, loading the remotes, and the shared API client and event bus |
+| **mfe-catalog** | 3001 | everyone | Catalogue list; admin: add books, demo clock; members: borrow, wait list, return, act-by-title form |
+| **mfe-account** | 3002 | members only (`memberOnly`) | *My account*: borrowed books with due dates, extend, return, wait lists, deposit and history |
+| **mfe-admin** | 3003 | admin only (`adminOnly`) | *Library dashboard*: members, books out, overdue and due-soon loans, deposits |
+
+How composition works:
+
+1. The shell's `index.html` has an **import map** that points `react` and `react-dom` to one copy served by the shell. Remotes are built with React as an *external*, so **all apps share one React instance**, downloaded once.
+2. At start-up the shell reads `/mfe-manifest.json`, the list of remotes and their URLs. It is generated at run time, so a remote can be redeployed or moved without rebuilding the shell.
+3. The shell `import()`s each remote. Every remote implements the same small contract: `contractVersion`, `mount(container, props)` and `unmount(container)`. A remote built for a different contract version is refused.
+4. `mount` receives `{ user, api, bus }` from the shell (dependency injection), and the remote renders into **its own React root**.
+
+| Option considered | Verdict |
+|---|---|
+| Build-time composition (npm packages) | Rejected: the parts are not independently deployable |
+| iframes | Rejected: poor UX (scrolling, focus, styling) and awkward communication |
+| Webpack / Rspack Module Federation | Good alternative, but ties every app to one bundler and its runtime |
+| **Native ES modules + import map** | **Chosen.** Web standards only, works with any bundler (esbuild here), remotes loaded by URL at run time. Trade-off: shared library versions are pinned centrally in the shell. |
+
+#### What the shell owns (and remotes reuse)
+
+* **Session**: the token is kept in `sessionStorage` (per browser tab). An expired session (401) returns the user to the login page.
+* **One API client** for everyone, layered as `circuit breaker → retry (GET only) → timeout → fetch`. It adds the bearer token and `X-Request-Id`. Only infrastructure failures (network, timeout, 5xx) count towards the breaker; business answers such as 404 or 409 do not. POSTs are never retried, because a "borrow" that timed out may already have happened.
+* **Event bus** (publish/subscribe), so remotes never import each other:
+
+  | Event | Sent by | Effect |
+  |---|---|---|
+  | `library:changed` | any remote after an action | every remote reloads its data |
+  | `toast:show` | any remote | the shell shows a notification |
+  | `account:status` | account remote | the shell updates the welcome panel with the latest status |
+  | `session:ended` | shell | remotes clean up on logout or expiry |
+
+* **Design tokens**: colours, fonts and spacing are CSS variables defined by the shell. Each remote prefixes its own CSS classes (`cat-`, `acc-`, `adm-`), so styles cannot collide.
+
+#### Fault isolation
+
+* Each remote has its own React root and **error boundary**. A remote that is down, too slow (5-second load timeout), the wrong contract version, or crashing breaks **only its own panel**, which shows an error with a *Try again* button. The rest of the page keeps working.
+* When the API client's circuit breaker opens, the shell shows a **service banner** and recovers automatically.
+
+#### Shared packages, build and security
+
+* `packages/contracts`: the API and micro-frontend types, plus date and money formatting, so every app shows "08 Dec 2026" and "Rs. 500" the same way.
+* `packages/resilience`: a dependency-free circuit breaker, retry with backoff and jitter, and timeout.
+* **esbuild** builds each app separately (as separate CI pipelines would) in about 100 ms.
+* The shell server proxies `/api` to the gateway, so the browser only ever talks to its own origin. It sends a strict **Content-Security-Policy**: scripts only from the known remote origins.
+* A **mock gateway** (`frontend/scripts/mock-gateway.mjs`) implements the same API in memory, so the UI and its Playwright tests can run without Java (`./start.sh --mock`). library-service remains the owner of the rules.
+
+### 1.4 Resilience at every layer
+
+| Layer | Circuit breaker | Retry | Timeout | Fallback / other |
+|---|---|---|---|---|
+| Browser (shell API client) | Opens after 3 infrastructure failures, half-opens after 10 s | GET only, backoff + jitter | 8 s | Service banner; per-remote error + *Try again* |
+| Gateway | One per downstream service (Resilience4j) | GET only | 4 s | JSON 503 + `Retry-After`; token-bucket **rate limit** (429); 16 KB request body limit |
+| library-service → user-service | `@CircuitBreaker` on `UserServiceClient` | `@Retry` (a token check is safe to repeat) | connect 1 s / read 2 s | Fast 503 when user-service is down; an invalid token (401) is a normal answer, not a failure |
+
+Every request carries an **`X-Request-Id`** from the browser through the gateway to both services. It appears on every log line and in every error response, so one id finds a request in all logs. All services shut down gracefully and expose Actuator health, readiness and circuit-breaker endpoints.
+
+### 1.5 Key decisions and trade-offs
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| Split only at the identity boundary | Keeps the lending rules (book, queue, loan, fee) in one consistent place | library-service is the biggest service |
+| Hexagonal services | Framework-free business rules; storage can change without touching use cases | More interfaces and packages than a plain layered app |
+| ES modules + import map instead of Module Federation | Standards-based and bundler-agnostic | Shared library versions are pinned in the shell |
+| The shell owns cross-cutting concerns | One session, one circuit breaker, one HTTP client for all remotes | Remotes depend on the shell's injected services (by design) |
+| Token introspection instead of JWT | Logout takes effect immediately; tokens carry no data | One extra call per request, protected by a breaker and retry |
+| Retry only idempotent (GET) requests | A retried POST could borrow twice or charge twice | A failed POST must be repeated by the user |
+| In-memory storage | Clean start on every run, no setup | Data is lost on restart; a single instance per service |
+
+The full reasoning, class diagrams, design patterns, sequence diagrams and non-functional requirements are in **[docs/DESIGN.md](docs/DESIGN.md)**. All diagrams are in `docs/diagrams/` as SVG with Mermaid sources.
+
+---
+
+## 2. Features at a glance
 
 | Area | What you can do |
 |---|---|
@@ -28,13 +183,13 @@ Browser ── shell :3000 ──┬── catalog remote :3001        (React mi
 | **Demo clock** | As admin, move the library date **+1 / +7 / +15 days** to see due dates, overdue blocks and late fees without waiting. |
 | **Resilience** | Circuit breakers, retries, timeouts, fallbacks and rate limiting; if one part fails, the rest of the UI keeps working. |
 
-Details: [Instruction manual](#2-instruction-manual) · [Lending rules](#lending-rules) · [Assumptions](#6-assumptions-and-decisions).
+Details: [Instruction manual](#4-instruction-manual) · [Lending rules](#lending-rules) · [Assumptions](#8-assumptions-and-decisions).
 
-The architecture, **class diagrams**, **design patterns**, NFRs, decisions and trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**. Diagrams are also in `docs/diagrams/` as SVG (with Mermaid sources).
+How it is built: see [1. Architecture](#1-architecture) above and [docs/DESIGN.md](docs/DESIGN.md).
 
 ---
 
-## 1. Quick start
+## 3. Quick start
 
 ```bash
 ./start.sh
@@ -59,11 +214,11 @@ Then open **http://localhost:3000**. Press `Ctrl+C` to stop.
 
 So on a machine with nothing installed except Git Bash (Windows) or a normal shell (macOS/Linux), `./start.sh` is enough.
 
-Free ports needed: 3000–3003 and 8080–8082. Each can be changed with an environment variable (see §5).
+Free ports needed: 3000–3003 and 8080–8082. Each can be changed with an environment variable (see §7).
 
 ---
 
-## 2. Instruction manual
+## 4. Instruction manual
 
 Each command from the brief maps to the UI as follows.
 
@@ -104,7 +259,7 @@ This exact scenario is automated twice: over HTTP with REST Assured and in the b
 
 ---
 
-## 3. Tests
+## 5. Tests
 
 ### Backend: JUnit 5, REST Assured, Spring Boot Test
 
@@ -143,7 +298,7 @@ Reports go to `frontend/playwright-report/`; traces, videos and screenshots of f
 
 ---
 
-## 4. Project layout
+## 6. Project layout
 
 ```
 .
@@ -174,7 +329,7 @@ Reports go to `frontend/playwright-report/`; traces, videos and screenshots of f
 
 ---
 
-## 5. Configuration
+## 7. Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -193,7 +348,7 @@ Useful endpoints while running: `http://localhost:8080/actuator/health`, `/actua
 
 ---
 
-## 6. Assumptions and decisions
+## 8. Assumptions and decisions
 
 The full table with reasoning is in [docs/DESIGN.md §9](docs/DESIGN.md#9-decisions-on-ambiguities-and-assumptions). In short:
 
@@ -208,7 +363,7 @@ The full table with reasoning is in [docs/DESIGN.md §9](docs/DESIGN.md#9-decisi
 
 ---
 
-## 7. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
