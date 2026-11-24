@@ -1,0 +1,9 @@
+{
+  "name": "@library/resilience",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependency-free resilience primitives: circuit breaker, retry, timeout, rate limiter, mutex",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

@@ -1,0 +1,49 @@
+classDiagram
+    direction LR
+    class MicroFrontend {
+        <<contract v1>>
+        +contractVersion: number
+        +mount(container, MountProps)
+        +unmount(container)
+    }
+    class MountProps {
+        +user: UserDto
+        +api: ApiClient
+        +bus: EventBus
+    }
+    class ApiClient {
+        <<interface>>
+        +get(path)
+        +post(path, body)
+        +delete(path)
+    }
+    class EventBus {
+        <<interface>>
+        +emit(event, payload)
+        +on(event, listener) unsubscribe
+    }
+    class App {
+        <<shell>>
+        session · toasts · circuit state
+    }
+    class RemoteSlot { load · mount · isolate failures · retry }
+    class createApiClient { breaker → retry(GET) → timeout → fetch }
+    class CircuitBreaker {
+        CLOSED / OPEN / HALF_OPEN
+        +execute(action)
+    }
+    class createRemoteLoader { import(url) + timeout + contract validation + cache }
+    class CatalogRemote { <<remote :3001>> }
+    class AccountRemote { <<remote :3002>> }
+
+    App --> RemoteSlot
+    App --> createApiClient
+    createApiClient --> CircuitBreaker
+    RemoteSlot --> createRemoteLoader
+    RemoteSlot ..> MicroFrontend : mounts
+    MicroFrontend <|.. CatalogRemote
+    MicroFrontend <|.. AccountRemote
+    MicroFrontend ..> MountProps
+    MountProps --> ApiClient
+    MountProps --> EventBus
+    createApiClient ..|> ApiClient

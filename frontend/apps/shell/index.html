@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Library</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <!--
+      Shared dependencies for every micro-frontend. Remotes are built with react/react-dom as
+      externals, so the bare imports in their bundles resolve here and all of them share a single
+      React instance served by the shell.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "/vendor/react.js",
+          "react/jsx-runtime": "/vendor/react-jsx-runtime.js",
+          "react-dom/client": "/vendor/react-dom-client.js"
+        }
+      }
+    </script>
+    <script type="module" src="/main.js"></script>
+  </head>
+  <body>
+    <noscript>This application needs JavaScript.</noscript>
+    <div id="root"></div>
+  </body>
+</html>

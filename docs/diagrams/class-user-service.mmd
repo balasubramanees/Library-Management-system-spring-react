@@ -1,0 +1,46 @@
+classDiagram
+    direction LR
+    class UserName {
+        <<value object>>
+        +String value
+        +String key
+        +of(raw)$ UserName
+    }
+    class User {
+        <<record>>
+        +String id
+        +String name
+        +register(UserName)$ User
+        +isAdmin() boolean
+    }
+    class SessionService {
+        <<application service>>
+        +login(name) LoginResult
+        +currentUser(token) User
+        +logout(token) User
+    }
+    class UserRepository {
+        <<port>>
+        +findById(id) Optional~User~
+        +saveIfAbsent(User) User
+    }
+    class SessionStore {
+        <<port>>
+        +create(userId) String
+        +resolve(token) Optional~String~
+        +revoke(token)
+    }
+    class InMemoryUserRepository { <<adapter>> }
+    class InMemorySessionStore {
+        <<adapter>>
+        -Duration idleTimeout
+        -SecureRandom random
+    }
+    class SessionController { <<REST adapter>> }
+
+    User ..> UserName
+    SessionService --> UserRepository
+    SessionService --> SessionStore
+    UserRepository <|.. InMemoryUserRepository
+    SessionStore <|.. InMemorySessionStore
+    SessionController --> SessionService

@@ -1,0 +1,66 @@
+sequenceDiagram
+    autonumber
+    actor Admin as admin (librarian)
+    participant Cat as Catalog<br/>(mfe-catalog)
+    participant Hook as useAsyncAction
+    participant Dash as Dashboard<br/>(mfe-admin)
+    participant Api as ApiClient<br/>(shell: createApiClient)
+    participant Edge as shell server<br/>(serve-frontends.mjs proxy)
+    participant GW as gateway<br/>RequestIdFilter · RateLimitFilter<br/>RoutesConfig
+    participant Res as CurrentMemberResolver<br/>(library-service)
+    participant USC as UserServiceClient
+    participant US as user-service<br/>SessionController
+    participant Ctl as BookController /<br/>AdminDashboardController
+    participant Svc as LibraryService
+    participant Repo as InMemoryBookRepository /<br/>InMemoryAccountRepository
+
+    Admin->>Cat: types "Dune", clicks "Add book"
+    Cat->>Hook: run("add:Dune", …)
+    Hook->>Api: post("/books", {title})
+    Note over Api: CircuitBreaker.execute → withTimeout(8 s) → fetch<br/>(POST is never retried)
+    Api->>Edge: POST /api/books (Authorization: Bearer, X-Request-Id)
+    Edge->>GW: proxy(): POST /api/books + X-Forwarded-For
+    Note over GW: RequestIdFilter keeps X-Request-Id<br/>RateLimitFilter → TokenBucketRateLimiter.tryConsume (429 if empty)<br/>route "library-service": StripPrefix=1, circuit breaker "libraryService"
+    GW->>Res: POST /books
+    Res->>USC: findByToken(token)
+    USC->>US: GET /sessions/current (@Retry, @CircuitBreaker "userService")
+    Note over US: SessionService.currentUser → InMemorySessionStore.resolve<br/>→ InMemoryUserRepository.findById
+    US-->>USC: 200 {id:"admin", isAdmin:true}
+    USC-->>Res: Member("admin", "admin", admin=true)
+    Res->>Ctl: BookController.add(member, TitleRequest)
+    Ctl->>Svc: addBook(member, "Dune")
+    Note over Svc: actor.admin()? else ForbiddenException (403)<br/>BookTitle.of(raw) validates · takes the write lock
+    Svc->>Repo: findByTitleKey("dune")
+    Repo-->>Svc: empty (else BookAlreadyExistsException → 409)
+    Svc->>Svc: Book.register(id, title)
+    Svc->>Repo: save(book)
+    Svc-->>Ctl: Book
+    Ctl-->>GW: 201 AddBookResponse {message, book}
+    GW-->>Edge: 201
+    Edge-->>Api: 201
+    Api-->>Hook: AddBookResponse
+    Hook->>Hook: bus.emit("toast:show"), bus.emit("library:changed")
+
+    par catalogue refresh
+        Hook-->>Cat: library:changed
+        Cat->>Api: get("/books") → … → BookController.list → LibraryService.listBooks
+        Api-->>Cat: BookListResponse → re-render list
+    and dashboard refresh
+        Hook-->>Dash: library:changed
+        Dash->>Api: get("/admin/dashboard")
+        Api->>Edge: GET /api/admin/dashboard (GET: retried up to 3 times)
+        Edge->>GW: proxy()
+        GW->>Res: GET /admin/dashboard (same filters as above)
+        Res->>USC: findByToken(token) → user-service (as steps 7–10)
+        USC-->>Res: Member(admin)
+        Res->>Ctl: AdminDashboardController.dashboard(member)
+        Ctl->>Svc: dashboard(member)
+        Note over Svc: actor.admin()? else 403 · takes the read lock
+        Svc->>Repo: InMemoryBookRepository.findAll()
+        Svc->>Repo: InMemoryAccountRepository.findAll()
+        Note over Svc: builds AdminLoanView (ON_TIME / DUE_SOON / OVERDUE),<br/>AdminMemberView, AdminSummary → AdminDashboard
+        Svc-->>Ctl: AdminDashboard
+        Ctl-->>Api: 200 AdminDashboardResponse (via gateway and shell server)
+        Api-->>Dash: summary, members, loans
+        Dash-->>Admin: tiles + Books out / Members tables re-render
+    end

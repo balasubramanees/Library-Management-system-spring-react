@@ -1,0 +1,7 @@
+{
+  "name": "@library/mfe-catalog",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remote: catalogue (list, add for admin, borrow, wait list)",
+  "type": "module"
+}

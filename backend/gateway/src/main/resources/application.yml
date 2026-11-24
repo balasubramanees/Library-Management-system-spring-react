@@ -1,0 +1,48 @@
+server:
+  port: ${GATEWAY_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: gateway
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+  main:
+    banner-mode: "off"
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 1000
+            response-timeout: 5s
+
+library:
+  gateway:
+    user-service-url: ${USER_SERVICE_URL:http://localhost:8081}
+    library-service-url: ${LIBRARY_SERVICE_URL:http://localhost:8082}
+    resilience:
+      timeout: 4s
+      sliding-window-size: 10
+      minimum-number-of-calls: 5
+      failure-rate-threshold: 50
+      wait-duration-in-open-state: 10s
+      retries-for-get: 2
+    rate-limit:
+      capacity: 60
+      refill-per-second: 20
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,circuitbreakers,gateway
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+logging:
+  level:
+    access: INFO

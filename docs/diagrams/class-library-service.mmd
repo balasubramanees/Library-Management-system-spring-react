@@ -1,0 +1,135 @@
+classDiagram
+    direction LR
+
+    class Book {
+        <<aggregate root>>
+        -String id
+        -String title
+        -String titleKey
+        -Loan loan
+        -List~Member~ waitlist
+        +register(id, BookTitle)$ Book
+        +borrow(Member, today, LendingPolicy) Loan
+        +returnBy(memberId, today, LendingPolicy) Returned
+        +extend(memberId, today, LendingPolicy) Loan
+        +joinWaitlist(Member) int
+        +isAvailable() boolean
+        +waitlistPositionOf(memberId) Optional~Integer~
+        +snapshot() Snapshot
+    }
+    class Loan {
+        <<value object>>
+        +String memberId
+        +String memberName
+        +LocalDate borrowedOn
+        +LocalDate dueDate
+        +int extensions
+        +start(Member, today, LendingPolicy)$ Loan
+        +overdueDays(today) long
+        +lateFee(today, LendingPolicy) Money
+        +extensionsLeft(LendingPolicy) int
+    }
+    class LendingPolicy {
+        <<value object>>
+        +int loanPeriodDays = 14
+        +int extensionDays = 7
+        +int maxExtensions = 2
+        +Money lateFeePerDay = Rs. 10
+        +Money initialDeposit = Rs. 500
+        +Money minimumTopUp = Rs. 100
+    }
+    class MemberAccount {
+        <<aggregate root>>
+        +String memberId
+        +Money balance
+        +List~Entry~ ledger
+        +open(memberId, deposit, today)$ MemberAccount
+        +deposit(Money, today) MemberAccount
+        +chargeLateFee(Money, title, days, today) MemberAccount
+    }
+    class Money {
+        <<value object>>
+        +long rupees
+        +plus(Money) Money
+        +minus(Money) Money
+        +times(long) Money
+    }
+    class BookTitle {
+        <<value object>>
+        +String value
+        +String key
+        +of(raw)$ BookTitle
+    }
+    class Member {
+        <<record>>
+        +String id
+        +String name
+        +boolean admin
+    }
+    class MemberNotification {
+        <<domain event>>
+        +Type type
+        +String memberId
+        +String message
+    }
+    class LibraryException {
+        <<abstract>>
+        +code() String
+    }
+    LibraryException <|-- BookNotFoundException
+    LibraryException <|-- BookNotAvailableException
+    LibraryException <|-- BorrowingBlockedException
+    LibraryException <|-- ExtensionNotAllowedException
+    LibraryException <|-- NotBorrowedByMemberException
+    LibraryException <|-- AlreadyWaitlistedException
+    LibraryException <|-- ForbiddenException
+    LibraryException <|-- ValidationException
+
+    class LibraryService {
+        <<application service>>
+        -ReadWriteLock lock
+        +addBook(Member, title) Book
+        +listBooks(Member) List~BookView~
+        +borrow(Member, title) BorrowResult
+        +returnBook(Member, title) ReturnResult
+        +extendLoan(Member, title) ExtendResult
+        +joinWaitlist(Member, title) WaitlistResult
+        +deposit(Member, rupees) DepositResult
+        +status(Member) MemberStatus
+    }
+    class BookRepository { <<port>> }
+    class AccountRepository { <<port>> }
+    class NotificationInbox { <<port>> }
+    class MemberDirectory {
+        <<port>>
+        +findByToken(token) Optional~Member~
+    }
+    class AdjustableClock {
+        <<adapter>>
+        +advance(Duration)
+    }
+    class UserServiceClient {
+        <<adapter>>
+        CircuitBreaker + Retry
+    }
+    class BookController { <<REST adapter>> }
+    class MeController { <<REST adapter>> }
+    class AdminController { <<REST adapter, demo clock>> }
+
+    Book *-- Loan
+    Book ..> BookTitle
+    Loan ..> LendingPolicy
+    Loan ..> Money
+    MemberAccount ..> Money
+    LibraryService --> BookRepository
+    LibraryService --> AccountRepository
+    LibraryService --> NotificationInbox
+    LibraryService --> LendingPolicy
+    LibraryService --> AdjustableClock : Clock
+    LibraryService ..> Book
+    LibraryService ..> MemberAccount
+    LibraryService ..> MemberNotification : creates
+    MemberDirectory <|.. UserServiceClient
+    BookController --> LibraryService
+    MeController --> LibraryService
+    AdminController --> AdjustableClock

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+coverage/
+test-results/
+*.zip
+*.tar.gz
+logs/
+.tools/
+target/
+frontend/test-results/
+frontend/playwright-report/
+
+# Lock files are not committed; npm install resolves the ranges in package.json
+package-lock.json

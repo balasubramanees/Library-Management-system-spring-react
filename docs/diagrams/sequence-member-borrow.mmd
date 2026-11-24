@@ -1,0 +1,68 @@
+sequenceDiagram
+    autonumber
+    actor M as Archana (member)
+    participant Cat as Catalog<br/>(mfe-catalog)
+    participant Hook as useAsyncAction
+    participant Acc as Account<br/>(mfe-account)
+    participant App as App<br/>(shell, WelcomePanel)
+    participant Api as ApiClient<br/>(shell: createApiClient)
+    participant Edge as shell server<br/>(serve-frontends.mjs proxy)
+    participant GW as gateway<br/>RequestIdFilter · RateLimitFilter<br/>RoutesConfig
+    participant Res as CurrentMemberResolver<br/>(library-service)
+    participant USC as UserServiceClient
+    participant US as user-service<br/>SessionController
+    participant Ctl as BookController /<br/>MeController
+    participant Svc as LibraryService
+    participant Book as Book (domain)
+    participant Repo as InMemoryBookRepository /<br/>InMemoryAccountRepository
+
+    M->>Cat: clicks "Borrow" on "Algebra"
+    Cat->>Hook: run("borrow:Algebra", …)
+    Hook->>Api: post("/books/borrow", {title})
+    Note over Api: CircuitBreaker.execute → withTimeout(8 s) → fetch<br/>(POST is never retried: it may already have been applied)
+    Api->>Edge: POST /api/books/borrow (Authorization: Bearer, X-Request-Id)
+    Edge->>GW: proxy(): POST /api/books/borrow + X-Forwarded-For
+    Note over GW: RequestIdFilter → RateLimitFilter (TokenBucketRateLimiter, 429)<br/>route "library-service": StripPrefix=1, circuit breaker "libraryService"
+    GW->>Res: POST /books/borrow
+    Res->>USC: findByToken(token)
+    USC->>US: GET /sessions/current (@Retry, @CircuitBreaker "userService")
+    Note over US: SessionService.currentUser → InMemorySessionStore.resolve<br/>→ InMemoryUserRepository.findById
+    US-->>USC: 200 {id:"archana", name:"Archana", isAdmin:false}
+    USC-->>Res: Member("archana", "Archana", admin=false)
+    Res->>Ctl: BookController.borrow(member, TitleRequest)
+    Ctl->>Svc: borrow(member, "Algebra")
+    Note over Svc: requireMember (admin → ForbiddenException 403)<br/>BookTitle.of(raw) · takes the write lock · today() from AdjustableClock
+    Svc->>Repo: InMemoryBookRepository.findByTitleKey("algebra")
+    Repo-->>Svc: Book (else BookNotFoundException → 404)
+    Svc->>Repo: InMemoryAccountRepository.findByMemberId("archana")
+    Repo-->>Svc: MemberAccount
+    Svc->>Svc: requireGoodStanding → blockedReason<br/>(overdue book or balance ≤ 0 → BorrowingBlockedException 409)
+    Svc->>Book: borrow(member, today, policy)
+    Note over Book: AlreadyBorrowedException / BookNotAvailableException (409)<br/>else loan = Loan.start(member, today, policy): due = today + 14 days
+    Book-->>Svc: Loan
+    Svc->>Repo: InMemoryBookRepository.save(book)
+    Svc-->>Ctl: BorrowResult(title, dueDate)
+    Ctl-->>GW: 200 BorrowResponse {message: "You borrowed Algebra. Please return it by …", dueDate}
+    GW-->>Edge: 200
+    Edge-->>Api: 200
+    Api-->>Hook: BorrowResponse
+    Hook->>Hook: bus.emit("toast:show"), bus.emit("library:changed")
+
+    par catalogue refresh
+        Hook-->>Cat: library:changed
+        Cat->>Api: get("/books") → … → BookController.list → LibraryService.listBooks
+        Api-->>Cat: BookListResponse → "Algebra (BORROWED) · You have it · due …"
+    and account + welcome panel refresh
+        Hook-->>Acc: library:changed
+        Acc->>Api: get("/me/status")
+        Api->>Ctl: GET /api/me/status → (shell server, gateway, token check as above) → MeController.status(member)
+        Ctl->>Svc: status(member)
+        Note over Svc: loans + wait lists from InMemoryBookRepository.findAll<br/>account via accountOf · InMemoryNotificationInbox.drain(memberId)
+        Svc-->>Ctl: MemberStatus
+        Ctl-->>Api: 200 StatusResponse (lines from StatusFormatter.lines)
+        Api-->>Acc: StatusResponse
+        Acc->>Acc: re-render borrowed books, deposit · toast each notification
+        Acc->>App: bus.emit("account:status", {lines without notifications})
+        App->>App: setWelcome([...greeting, ...lines])
+        App-->>M: welcome panel and My account both list "Algebra"
+    end

@@ -1,0 +1,13 @@
+sequenceDiagram
+    participant UI as browser API client
+    participant GW as gateway
+    participant LS as library-service (down)
+    UI->>GW: GET /api/books
+    GW->>LS: connect (refused)
+    GW->>LS: retry ×2 with backoff (GET only)
+    GW-->>UI: 503 {"error":{"code":"SERVICE_UNAVAILABLE"}} + Retry-After (fallback)
+    UI->>UI: retry GET ×2 (jittered), breaker counts 1 failure
+    Note over UI: after 3 failed calls the client breaker OPENS:<br/>banner shown, calls fail fast for 10 s
+    Note over GW: gateway breaker opens after 50% failures in 10 calls:<br/>fallback answers instantly without touching library-service
+    UI->>GW: (after 10 s) one trial call, HALF_OPEN
+    GW-->>UI: 200 → CLOSED, banner disappears

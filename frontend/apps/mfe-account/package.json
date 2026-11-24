@@ -1,0 +1,7 @@
+{
+  "name": "@library/mfe-account",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remote: my account (status: borrowed books, wait lists, returns)",
+  "type": "module"
+}

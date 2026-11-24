@@ -1,0 +1,79 @@
+server:
+  port: ${LIBRARY_SERVICE_PORT:8082}
+  shutdown: graceful
+
+spring:
+  application:
+    name: library-service
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+  main:
+    banner-mode: "off"
+
+library:
+  # Due dates are calendar dates in the library's time zone.
+  time-zone: ${LIBRARY_TIME_ZONE:Asia/Kolkata}
+  lending:
+    loan-period-days: 14
+    extension-days: 7
+    max-extensions: 2
+    late-fee-per-day: 10      # rupees
+    initial-deposit: 500      # rupees, taken in cash at registration
+    minimum-top-up: 100       # rupees
+  demo:
+    # Lets the admin move the library date forward to demonstrate due dates and late fees.
+    # Turn off for real use: LIBRARY_DEMO_TIME_TRAVEL=false
+    time-travel: ${LIBRARY_DEMO_TIME_TRAVEL:true}
+  user-service:
+    base-url: ${USER_SERVICE_URL:http://localhost:8081}
+    connect-timeout: PT1S
+    read-timeout: PT2S
+
+# Resilience for library-service -> user-service calls (see UserServiceClient).
+resilience4j:
+  circuitbreaker:
+    instances:
+      userService:
+        register-health-indicator: true
+        # An open breaker towards user-service must not mark library-service itself DOWN.
+        allow-health-indicator-to-fail: false
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 1500ms
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - com.library.books.adapter.out.userservice.UserServiceUnavailableException
+          - org.springframework.web.client.RestClientException
+  retry:
+    instances:
+      userService:
+        max-attempts: 3
+        wait-duration: 100ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.library.books.adapter.out.userservice.UserServiceUnavailableException
+          - org.springframework.web.client.RestClientException
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
+
+logging:
+  pattern:
+    correlation: "[%X{requestId:-}] "

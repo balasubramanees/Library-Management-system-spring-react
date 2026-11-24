@@ -1,0 +1,7 @@
+{
+  "name": "@library/mfe-admin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remote: the librarian's dashboard (members, current loans, overdue and due-soon books)",
+  "type": "module"
+}

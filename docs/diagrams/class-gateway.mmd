@@ -1,0 +1,13 @@
+classDiagram
+    class RoutesConfig {
+        +routes(RouteLocatorBuilder) RouteLocator
+        +circuitBreakerDefaults() Customizer
+    }
+    class RequestIdFilter { <<GlobalFilter>> order = HIGHEST }
+    class RateLimitFilter { <<GlobalFilter>> order = HIGHEST+1 }
+    class TokenBucketRateLimiter { +tryConsume(key) Decision }
+    class FallbackController { +fallback(service) 503 }
+    class LibraryGatewayProperties { <<@ConfigurationProperties>> }
+    RoutesConfig --> LibraryGatewayProperties
+    RateLimitFilter --> TokenBucketRateLimiter
+    RoutesConfig ..> FallbackController : forward on failure

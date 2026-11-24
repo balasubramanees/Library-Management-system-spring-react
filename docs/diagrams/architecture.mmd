@@ -1,0 +1,28 @@
+flowchart LR
+    subgraph Browser
+        SH["Shell (host)<br/>session · API client + circuit breaker<br/>event bus · toasts · layout"]
+        CAT["catalog remote<br/>list · add · borrow · wait list"]
+        ACC["account remote<br/>status · return"]
+        SH -- "mount(el, {user, api, bus})" --> CAT
+        SH -- "mount(el, {user, api, bus})" --> ACC
+    end
+
+    subgraph "Static origins (Node, no deps)"
+        S3000[":3000 shell server<br/>index.html · vendor React · /mfe-manifest.json<br/>/api proxy"]
+        S3001[":3001 catalog<br/>remoteEntry.js"]
+        S3002[":3002 account<br/>remoteEntry.js"]
+    end
+
+    subgraph "Spring Boot services"
+        GW[":8080 API Gateway<br/>Spring Cloud Gateway<br/>routing · circuit breaker + fallback<br/>retry (GET) · time limiter · rate limit · request id"]
+        US[":8081 user-service<br/>login · sessions · logout"]
+        LS[":8082 library-service<br/>books · loans · wait lists · notifications"]
+    end
+
+    Browser -- "HTML/JS" --> S3000
+    Browser -- "import()" --> S3001
+    Browser -- "import()" --> S3002
+    S3000 -- "/api/*" --> GW
+    GW -- "/api/sessions/** → /sessions/**" --> US
+    GW -- "/api/books/**, /api/me/** → /books/**, /me/**" --> LS
+    LS -- "GET /sessions/current<br/>(Resilience4j CB + retry + timeouts)" --> US

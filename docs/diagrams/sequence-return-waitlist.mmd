@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    actor Alice
+    participant UI as account remote
+    participant GW as gateway
+    participant LS as library-service
+    participant US as user-service
+    Alice->>UI: click "Return" on 1984
+    UI->>GW: POST /api/books/return {"title":"1984"} (Bearer, X-Request-Id)
+    GW->>LS: POST /books/return
+    LS->>US: GET /sessions/current (CB + retry)
+    US-->>LS: {id: "alice", ...}
+    Note over LS: write lock: book.returnBy("alice")<br/>→ borrower := waitlist.shift() = "bob"<br/>inbox.push(WaitlistAllocation(bob, 1984))
+    LS-->>GW: 200 {"message":"You returned \"1984\"."}
+    GW-->>UI: 200
+    UI->>UI: toast + bus.emit("library:changed") → catalogue refreshes
+    Note over Alice,US: Later: Bob logs in → GET /api/me/status drains his inbox →<br/>"You got the book "1984" from your waitlist"

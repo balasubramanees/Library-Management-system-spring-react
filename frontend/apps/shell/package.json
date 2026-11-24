@@ -1,0 +1,7 @@
+{
+  "name": "@library/shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Host application: session, resilient API client, event bus, layout; composes remotes at runtime",
+  "type": "module"
+}
